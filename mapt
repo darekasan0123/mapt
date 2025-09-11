@@ -1,0 +1,271 @@
+#!/bin/sh
+#=====================================================================
+# myapt – 超軽量 Debian/Ubuntu パッケージマネージャ
+# 依存: sh (busybox), dpkg, wget, awk, grep, sed, cut, tr, find
+#=====================================================================
+
+# --------------------------- 設定 ------------------------------------
+CACHE_DIR="${HOME}/.myapt/cache"
+DEB_DIR="${CACHE_DIR}/deb"
+PKG_DIR="${CACHE_DIR}/pkg"
+REPOS_CONF="${HOME}/.myapt/repos.conf"
+
+mkdir -p "$DEB_DIR" "$PKG_DIR"
+
+# --------------------------- ログ ------------------------------------
+log() { printf '[myapt] %s\n' "$*"; }
+
+# --------------------------- ヘルプ ----------------------------------
+show_help() {
+cat <<'EOF'
+myapt – minimal Debian/Ubuntu package manager
+
+Usage:
+  myapt update                # パッケージリスト取得 (キャッシュ)
+  myapt install <pkg>…        # 依存解決 → .deb ダウンロード → dpkg -i
+  myapt search <keyword>      # Packages から検索
+  myapt list                  # dpkg -l のシンプル表示
+  myapt clean                 # ダウンロードキャッシュ削除
+  myapt help                  # このヘルプ
+
+Configuration:
+  $HOME/.myapt/repos.conf   # 空白・改行区切りでミラーベースURLを列挙
+                            # 例:
+                            #   https://deb.debian.org/debian
+                            #   https://archive.ubuntu.com/ubuntu
+EOF
+}
+
+# --------------------------- Packages 取得 ---------------------------
+download_packages() {
+    # $1=baseURL  $2=dist  $3=component
+    local base=$1 dist=$2 comp=$3
+    local url="${base}/dists/${dist}/${comp}/binary-amd64/Packages.gz"
+    local out="${PKG_DIR}/${dist}-${comp}.Packages"
+
+    if [ -f "$out" ]; then
+        log "cached Packages: $out"
+        return 0
+    fi
+
+    log "downloading $url"
+    wget -q --no-check-certificat -O - "$url" | gunzip > "$out" || {
+        log "failed to download $url"
+        return 1
+    }
+}
+
+# --------------------------- Packages 解析 ---------------------------
+get_entry() {
+    # $1=package name  $2=Packages file
+    awk -v pkg="$1" '
+        $1=="Package:" && $2==pkg {found=1}
+        found && $1=="Filename:" {print $2; exit}
+    ' "$2"
+}
+
+get_version() {
+    awk -v pkg="$1" '
+        $1=="Package:" && $2==pkg {found=1}
+        found && $1=="Version:" {print $2; exit}
+    ' "$2"
+}
+
+get_deps() {
+    # 依存だけを改行区切りで出力（空行・空文字は除去）
+    awk -v pkg="$1" '
+        $1=="Package:" && $2==pkg {found=1}
+        found && ($1=="Depends:" || $1=="Pre-Depends:") {
+            sub(/^Depends: |^Pre-Depends: /,"")
+            gsub(/,/, "\n")
+            print
+            exit
+        }
+    ' "$2" |
+    tr -d ',' |
+    grep -v '^$' |
+    while read -r dep; do
+        dep=${dep%% (*}          # バージョン指定は除去
+        [ -n "$dep" ] && printf '%s\n' "$dep"
+    done
+}
+
+# --------------------------- 判定関数 --------------------------------
+# $1 = パッケージ名
+is_installed() {
+    # dpkg -l の古い表形式でも動くように awk+grep
+    dpkg -l 2>/dev/null | awk -v pkg="$1" 'NR>2 && $2==pkg {print $1}' |
+    grep -q '^ii$'
+}
+
+has_cached_deb() {
+    local pkg=$1
+    find "$DEB_DIR" -type f -name "${pkg}_*.deb" -print -quit | grep -q .
+}
+
+# --------------------------- 依存解決・インストール -------------------
+install_pkg() {
+    local pkg=$1
+    # -------------------------------------------------------------
+    # 1️⃣ 循環防止
+    # -------------------------------------------------------------
+    case " $PROCESSED " in
+        *" $pkg "*) log "cycle detected: $pkg → skip"; return 0 ;;
+    esac
+    PROCESSED="${PROCESSED} $pkg"
+
+    # -------------------------------------------------------------
+    # 2️⃣ すでにインストール済みか (dpkg -l の ii 判定)
+    # -------------------------------------------------------------
+    if is_installed "$pkg"; then
+        log "$pkg already installed (dpkg -l shows ii)"
+        return 0
+    fi
+
+    # -------------------------------------------------------------
+    # 3️⃣ キャッシュに .deb があればそれだけインストール
+    # -------------------------------------------------------------
+    if has_cached_deb "$pkg"; then
+        debpath=$(find "$DEB_DIR" -type f -name "${pkg}_*.deb" -print -quit)
+        log "using cached .deb $debpath"
+        dpkg -i --force-depends "$debpath" && return 0
+        log "dpkg failed → removing broken $debpath"
+        rm -f "$debpath"
+        # 失敗したらキャッシュを削除して以降のフローへ流す
+    fi
+
+    # -------------------------------------------------------------
+    # 4️⃣ Packages ファイルから情報取得
+    # -------------------------------------------------------------
+    local pkgs_file entry ver file url debpath
+    for f in "${PKG_DIR}"/*.Packages; do
+        entry=$(get_entry "$pkg" "$f") && [ -n "$entry" ] && {
+            pkgs_file=$f
+            break
+        }
+    done
+    if [ -z "$pkgs_file" ]; then
+        log "package $pkg not found in any Packages file"
+        return 1
+    fi
+
+    ver=$(get_version "$pkg" "$pkgs_file")
+    file=$(get_entry "$pkg" "$pkgs_file")
+    # 1 行目のリポジトリURLだけ使う（簡易版）
+    url=$(head -n1 "$REPOS_CONF")
+    debpath="${DEB_DIR}/${file##*/}"
+
+    # -------------------------------------------------------------
+    # 5️⃣ 依存取得（再帰）
+    # -------------------------------------------------------------
+    deps=$(get_deps "$pkg" "$pkgs_file")
+    if [ -n "$deps" ]; then
+        log "installing deps of $pkg: $deps"
+        for d in $deps; do
+            install_pkg "$d"
+        done
+    fi
+
+    # -------------------------------------------------------------
+    # 6️⃣ .deb がまだ無ければダウンロード
+    # -------------------------------------------------------------
+    if [ ! -f "$debpath" ]; then
+        log "downloading $url/$file → $debpath"
+        mkdir -p "$(dirname "$debpath")"
+        wget --no-check-certificat -q -O "$debpath" "${url}/${file}" || {
+            log "failed to fetch $url/$file"
+            return 1
+        }
+    else
+        log "cached .deb already present $debpath"
+    fi
+
+    # -------------------------------------------------------------
+    # 7️⃣ dpkg -i でインストール
+    # -------------------------------------------------------------
+    log "dpkg -i --force-depends $debpath"
+    dpkg -i "$debpath" || {
+        log "dpkg failed for $pkg – trying missing deps"
+        missing=$(dpkg -V "$pkg" 2>&1 | grep -i 'missing' | awk '{print $2}')
+        for m in $missing; do install_pkg "$m"; done
+        dpkg -i "$debpath"
+    }
+}
+
+# --------------------------- コマンド分岐 ---------------------------
+cmd=$1
+shift 2>/dev/null || :
+
+case "$cmd" in
+    update)
+        # repos.conf が無ければ作成
+        if [ ! -f "$REPOS_CONF" ]; then
+            cat <<'EOT' > "$REPOS_CONF"
+https://deb.debian.org/debian
+EOT
+            log "created default $REPOS_CONF"
+        fi
+        # ディストリビューションは固定（例: bookworm）
+        dist=bookworm
+        for comp in main contrib non-free; do
+            for repo in $(tr -s ' \n' < "$REPOS_CONF"); do
+                download_packages "$repo" "$dist" "$comp"
+            done
+        done
+        ;;
+
+    install)
+        [ $# -eq 0 ] && { log "no package specified"; exit 1; }
+        for pkg in "$@"; do
+            PROCESSED=""                 # １パッケージごとにリセット
+            install_pkg "$pkg"
+        done
+        ;;
+
+    search)
+        [ $# -eq 0 ] && { log "keyword required"; exit 1; }
+        keyword=$1
+        for f in "${PKG_DIR}"/*.Packages; do
+            awk -v kw="$keyword" '
+                $1=="Package:"{pkg=$2}
+                $1=="Description:"{desc=$0; sub(/^Description: */,"",desc)}
+                $1=="Description:"||$1=="Description-zh:"{
+                    if (tolower(pkg) ~ tolower(kw) || tolower(desc) ~ tolower(kw))
+                        print pkg "\t" desc
+                }
+            ' "$f"
+        done | sort -u
+        ;;
+
+    list)
+        # -------------------------------------------------------------
+        # dpkg -l のシンプル表示
+        #   1列目: 状態 (ii/rc/…)
+        #   2列目: パッケージ名
+        #   3列目: バージョン
+        # -------------------------------------------------------------
+        printf '%-3s %-30s %s\n' 'St' 'Package' 'Version'
+        printf '%-3s %-30s %s\n' '--' '------------------------------' '-------'
+        dpkg -l 2>/dev/null | awk '
+            NR>2 {
+                status=$1; pkg=$2; ver=$3;
+                printf "%-3s %-30s %s\n", status, pkg, ver
+            }
+        '
+        ;;
+
+    clean)
+        log "removing cached .deb files"
+        rm -rf "${DEB_DIR:?}"/*
+        ;;
+
+    help|--help|-h)
+        show_help
+        ;;
+
+    *)
+        log "unknown command: $cmd"
+        show_help
+        exit 1
+        ;;
+esac
