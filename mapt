@@ -1,6 +1,6 @@
 #!/bin/sh
 #=====================================================================
-# myapt – 超軽量 Debian/Ubuntu パッケージマネージャ
+# mapt – 超軽量 Debian/Ubuntu パッケージマネージャ
 # 依存: sh (busybox), dpkg, wget, awk, grep, sed, cut, tr, find
 #=====================================================================
 
@@ -18,15 +18,15 @@ log() { printf '[myapt] %s\n' "$*"; }
 # --------------------------- ヘルプ ----------------------------------
 show_help() {
 cat <<'EOF'
-myapt – minimal Debian/Ubuntu package manager
+mapt – minimal Debian/Ubuntu package manager
 
 Usage:
-  myapt update                # パッケージリスト取得 (キャッシュ)
-  myapt install <pkg>…        # 依存解決 → .deb ダウンロード → dpkg -i
-  myapt search <keyword>      # Packages から検索
-  myapt list                  # dpkg -l のシンプル表示
-  myapt clean                 # ダウンロードキャッシュ削除
-  myapt help                  # このヘルプ
+  mapt update                # パッケージリスト取得 (キャッシュ)
+  mapt install <pkg>…        # 依存解決 → .deb ダウンロード → dpkg -i
+  mapt search <keyword>      # Packages から検索
+  mapt list                  # dpkg -l のシンプル表示
+  mapt clean                 # ダウンロードキャッシュ削除
+  mapt help                  # このヘルプ
 
 Configuration:
   $HOME/.myapt/repos.conf   # 空白・改行区切りでミラーベースURLを列挙
@@ -269,3 +269,4 @@ EOT
         exit 1
         ;;
 esac
+
