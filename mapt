@@ -5,10 +5,10 @@
 #=====================================================================
 
 # --------------------------- 設定 ------------------------------------
-CACHE_DIR="${HOME}/.myapt/cache"
+CACHE_DIR="${HOME}/.mapt/cache"
 DEB_DIR="${CACHE_DIR}/deb"
 PKG_DIR="${CACHE_DIR}/pkg"
-REPOS_CONF="${HOME}/.myapt/repos.conf"
+REPOS_CONF="${HOME}/.mapt/repos.conf"
 
 mkdir -p "$DEB_DIR" "$PKG_DIR"
 
@@ -29,7 +29,7 @@ Usage:
   mapt help                  # このヘルプ
 
 Configuration:
-  $HOME/.myapt/repos.conf   # 空白・改行区切りでミラーベースURLを列挙
+  $HOME/.mapt/repos.conf   # 空白・改行区切りでミラーベースURLを列挙
                             # 例:
                             #   https://deb.debian.org/debian
                             #   https://archive.ubuntu.com/ubuntu
@@ -269,4 +269,5 @@ EOT
         exit 1
         ;;
 esac
+
 
